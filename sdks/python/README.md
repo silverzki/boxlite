@@ -158,6 +158,15 @@ for info in boxes:
 
 #### Runtime Image Management
 
+This is the **local** image cache on this machine — what has been pulled onto
+the host the runtime runs on. It is not the cloud catalog; see
+[Cloud image catalog](#cloud-image-catalog) for that one, and the table there
+for which is which.
+
+Embedded backends only. On a REST runtime, `runtime.images` raises
+`Unsupported` ("Image operations not supported over REST API") — a remote
+server does not lend out its host's cache.
+
 ```python
 runtime = boxlite.Boxlite.default()
 
@@ -224,6 +233,66 @@ reference server.
 The CLI captures `Principal.path_prefix` at login and caches it
 under the active profile, so subsequent `boxlite` commands route
 correctly without an extra flag.
+
+### Cloud image catalog
+
+Two things are called "images", and mixing them up is the easy mistake:
+
+| Namespace | What it is | Backends |
+| --- | --- | --- |
+| `runtime.images` | The **local** image cache on this machine (`pull` / `list`) | Embedded only — a REST runtime raises `Unsupported` |
+| `c.images` | The **cloud** catalog your organization has pulled (`list` / `get` / `delete` / `usage`) | REST |
+
+`boxlite.cloud` needs no extra install: it is stdlib-only, like the rest of the
+package. The bare name is async and the `Sync` prefix blocks, matching
+`boxlite.sync_api`.
+
+```python
+from boxlite.cloud import SyncCloudClient, ImageNotFound
+
+# api_key defaults to BOXLITE_API_KEY, base_url to BOXLITE_REST_URL.
+c = SyncCloudClient(api_key="blk_live_…")
+
+for row in c.images.list():
+    print(row["name"], row["tags"], row["lastUsedAt"])
+
+detail = c.images.get("quay.io/acme/app")  # also takes a catalog id
+for version in detail["versions"]:
+    print(version["digest"], version["sizeBytes"], version["sourceRef"])
+
+usage = c.images.usage()
+print(usage["count"], "/", usage["limit"])  # a count of images, not bytes
+
+try:
+    c.images.delete("quay.io/acme/app")
+except ImageNotFound:
+    pass  # delete reads as idempotent
+```
+
+There is no `create`: an image enters the catalog by being used. Start a box
+from any allowed reference with the normal SDK and it appears afterwards.
+
+`delete` removes the **entry, not the bytes** — runners keep whatever they
+cached, and using the same reference again pulls it back as a new entry. That
+is also how to pick up a tag that has moved upstream, because a recorded tag
+keeps the digest it first resolved to. A box that has not been destroyed still
+holds its image, and deleting one then raises `ImageInUse`.
+
+The async face is the same surface:
+
+```python
+from boxlite.cloud import CloudClient
+
+c = CloudClient()
+rows = await c.images.list()
+```
+
+The first box built from a new image waits for the pull. While it does, the
+box's REST representation carries
+`progress = {"phase": "preparing_image", "retryAfterMs": …}`, and a create that
+times out waiting answers `408` with the same `progress` and a `Retry-After`
+header. The image resolves server-side — this client never builds a registry
+address of its own.
 
 ### Box Configuration
 

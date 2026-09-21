@@ -45,12 +45,16 @@ export const IMAGE_COUNT_LIMIT_CODE = 'image_count_limit_reached'
  * distinct images is what actually grows the fleet's disk. An image already in
  * the catalog is therefore never refused *by this limit* — it adds no kind.
  * The cold-pull budget is a separate gate and still applies to it.
+ *
+ * The message names the remedy because there is one: `DELETE /images/:idOrRef`
+ * takes an entry out of the catalog, which frees a slot. It deliberately did
+ * not while that route was still unbuilt.
  */
 export class ImageCountLimitReachedError extends HttpException {
   constructor(limit: number) {
     super(
       {
-        message: `This organization already holds its limit of ${limit} images. This limit does not apply to the images it already holds.`,
+        message: `This organization already holds its limit of ${limit} images. Remove one from the catalog before using a new image; boxes can still be created from the images it already holds.`,
         code: IMAGE_COUNT_LIMIT_CODE,
       },
       HttpStatus.BAD_REQUEST,

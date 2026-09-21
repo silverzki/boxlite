@@ -12,11 +12,14 @@ import { BoxService } from './box.service'
 describe('BoxService DTO conversion', () => {
   const activityFailure = new Error('READONLY You cannot write against a read only replica')
 
-  function createService(boxActivityService: unknown): BoxService {
+  function createService(boxActivityService: unknown, imagePreparationService?: unknown): BoxService {
     const service = Object.create(BoxService.prototype) as BoxService
     Object.assign(service as any, {
       logger: { warn: jest.fn(), error: jest.fn() },
       boxActivityService,
+      imagePreparationService: imagePreparationService ?? {
+        preparingImage: jest.fn().mockResolvedValue(new Set<string>()),
+      },
       resolveToolboxProxyUrl: jest.fn().mockResolvedValue('https://proxy.test/toolbox'),
       resolveToolboxProxyUrls: jest.fn(
         async (regionIds: string[]) => new Map(regionIds.map((id) => [id, `https://${id}.test/toolbox`])),
@@ -45,6 +48,22 @@ describe('BoxService DTO conversion', () => {
     expect(dtos.map((dto) => dto.id)).toEqual(boxes.map((box) => box.id))
     expect(dtos.map((dto) => dto.toolboxProxyUrl)).toEqual(['https://us.test/toolbox', 'https://eu.test/toolbox'])
     expect(dtos.map((dto) => dto.lastActivityAt)).toEqual([undefined, undefined])
+  })
+
+  // Same rule as the activity read, for the same reason: what a box is waiting
+  // on is commentary, and losing the catalog must not turn a create that
+  // already persisted a box into a failure the caller retries.
+  it('serves a box without progress when the preparation read fails', async () => {
+    const box = new Box('us', 'data-loader')
+    const service = createService(
+      { getLastActivityAt: jest.fn().mockResolvedValue(null) },
+      { preparingImage: jest.fn().mockRejectedValue(new Error('catalog unavailable')) },
+    )
+
+    const dto = await service.toBoxDto(box)
+
+    expect(dto.id).toBe(box.id)
+    expect(dto.progress).toBeUndefined()
   })
 
   it('still fails the conversion when the toolbox proxy URL cannot be resolved', async () => {

@@ -20,6 +20,7 @@ import { BadRequestError } from '../../exceptions/bad-request.exception'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { BOX_WARM_POOL_UNASSIGNED_ORGANIZATION } from '../constants/box.constants'
 import { ImageAdmissionService } from '../../image/services/image-admission.service'
+import { ImagePreparationService } from '../../image/services/image-preparation.service'
 import { ImageResolverService } from '../../image/services/image-resolver.service'
 import { ImageRegistrarService, ReportedImage } from '../../image/services/image-registrar.service'
 import { BoxWarmPoolService } from './box-warm-pool.service'
@@ -127,6 +128,7 @@ export class BoxService {
     private readonly imageAdmissionService: ImageAdmissionService,
     private readonly imageResolverService: ImageResolverService,
     private readonly imageRegistrarService: ImageRegistrarService,
+    private readonly imagePreparationService: ImagePreparationService,
   ) {}
 
   protected getLockKey(id: string): string {
@@ -1132,23 +1134,34 @@ export class BoxService {
    * between "unknown" and "idle" decides whether a box is stopped.
    */
   async toBoxDto(box: Box): Promise<BoxDto> {
-    const [toolboxProxyUrl, lastActivityAt] = await Promise.all([
+    const [toolboxProxyUrl, lastActivityAt, preparing] = await Promise.all([
       this.resolveToolboxProxyUrl(box.region),
       this.boxActivityService.getLastActivityAt(box.id).catch((err) => {
         this.logger.warn(`Failed to read last activity for box ${box.id}: ${err}`)
         return null
       }),
+      // Degrades to absent for the same reason as the activity read: what the
+      // box is waiting on is commentary on the box, and losing it must not turn
+      // a successful create into a failed one.
+      this.imagePreparationService.preparingImage([box]).catch((err) => {
+        this.logger.warn(`Failed to read image preparation for box ${box.id}: ${err}`)
+        return new Set<string>()
+      }),
     ])
-    return BoxDto.fromBox(box, toolboxProxyUrl, lastActivityAt)
+    return BoxDto.fromBox(box, toolboxProxyUrl, lastActivityAt, preparing.has(box.id))
   }
 
   /** Degrades a failed activity read to absent, as {@link toBoxDto} does. */
   async toBoxDtos(boxes: Box[]): Promise<BoxDto[]> {
-    const [urlMap, activityMap] = await Promise.all([
+    const [urlMap, activityMap, preparing] = await Promise.all([
       this.resolveToolboxProxyUrls(boxes.map((s) => s.region)),
       this.boxActivityService.getLastActivityAtMany(boxes.map((s) => s.id)).catch((err) => {
         this.logger.warn(`Failed to read last activity for ${boxes.length} boxes: ${err}`)
         return new Map<string, Date>()
+      }),
+      this.imagePreparationService.preparingImage(boxes).catch((err) => {
+        this.logger.warn(`Failed to read image preparation for ${boxes.length} boxes: ${err}`)
+        return new Set<string>()
       }),
     ])
     return boxes.map((s) => {
@@ -1156,7 +1169,7 @@ export class BoxService {
       if (!url) {
         throw new NotFoundException(`Toolbox proxy URL not resolved for region ${s.region}`)
       }
-      return BoxDto.fromBox(s, url, activityMap.get(s.id))
+      return BoxDto.fromBox(s, url, activityMap.get(s.id), preparing.has(s.id))
     })
   }
 

@@ -7,9 +7,30 @@
 import { ApiProperty, ApiPropertyOptional, ApiSchema } from '@nestjs/swagger'
 import { BoxState } from '../enums/box-state.enum'
 import { IsEnum, IsOptional } from 'class-validator'
+import { IMAGE_PREPARATION_RETRY_AFTER_MS } from '../constants/box-progress.constant'
 import { Box } from '../entities/box.entity'
 import { BoxDesiredState } from '../enums/box-desired-state.enum'
 import { BoxClass } from '../enums/box-class.enum'
+import { BoxProgressPhase } from '../enums/box-progress-phase.enum'
+import { reportedBoxState } from '../utils/box-state.util'
+
+@ApiSchema({ name: 'BoxProgress' })
+export class BoxProgressDto {
+  @ApiProperty({
+    description: 'What this box is waiting on while it is being created',
+    enum: BoxProgressPhase,
+    enumName: 'BoxProgressPhase',
+    example: BoxProgressPhase.PREPARING_IMAGE,
+  })
+  @IsEnum(BoxProgressPhase)
+  phase: BoxProgressPhase
+
+  @ApiProperty({
+    description: 'Suggested wait before asking about this box again, in milliseconds. A hint, not a deadline',
+    example: IMAGE_PREPARATION_RETRY_AFTER_MS,
+  })
+  retryAfterMs: number
+}
 
 @ApiSchema({ name: 'BoxVolume' })
 export class BoxVolume {
@@ -290,12 +311,31 @@ export class BoxDto {
   })
   toolboxProxyUrl: string
 
+  @ApiPropertyOptional({
+    description:
+      'What a box still being created is waiting on. Absent once it has started, and absent while it is being created from an image that has already been pulled',
+    type: BoxProgressDto,
+    required: false,
+  })
+  @IsOptional()
+  progress?: BoxProgressDto
+
   // `lastActivityAt` is passed in rather than read off the entity: the freshest
   // value lives in the activity service's Redis buffer, and the entity's
   // same-named relation is a `BoxLastActivity` row that read paths do not join.
   // It is reported raw, without the auto-stop sweeper's fallback to
   // `updatedAt` — that fallback is a stop policy, not recorded activity.
-  static fromBox(box: Box, toolboxProxyUrl: string, lastActivityAt?: Date | null): BoxDto {
+  //
+  // `preparingImage` is passed in for the same reason: answering it needs the
+  // organization's catalog, which is a query, and a DTO mapper is not where a
+  // query belongs. The caller decides whether it is worth asking — for a box
+  // that has already started it is not.
+  static fromBox(box: Box, toolboxProxyUrl: string, lastActivityAt?: Date | null, preparingImage = false): BoxDto {
+    // Read once: the state this payload reports and the state the progress
+    // field is gated on are the same claim, and deriving it twice is what
+    // would let them drift.
+    const state = reportedBoxState(box)
+
     return {
       id: box.id,
       organizationId: box.organizationId,
@@ -313,7 +353,7 @@ export class BoxDto {
       networkAllowList: box.networkAllowList,
       labels: box.labels,
       volumes: box.volumes,
-      state: this.getBoxState(box),
+      state,
       desiredState: box.desiredState,
       errorReason: box.errorReason,
       recoverable: box.recoverable,
@@ -327,34 +367,18 @@ export class BoxDto {
       daemonVersion: box.daemonVersion,
       runnerId: box.runnerId,
       toolboxProxyUrl,
+      // Only while the box reads as being created. A started box is not
+      // waiting on anything, so reporting what it once waited on would be a
+      // field that never clears.
+      ...(preparingImage && state === BoxState.CREATING
+        ? {
+            progress: {
+              phase: BoxProgressPhase.PREPARING_IMAGE,
+              retryAfterMs: IMAGE_PREPARATION_RETRY_AFTER_MS,
+            },
+          }
+        : {}),
     }
-  }
-
-  private static getBoxState(box: Box): BoxState {
-    switch (box.state) {
-      case BoxState.STARTED:
-        if (box.desiredState === BoxDesiredState.STOPPED) {
-          return BoxState.STOPPING
-        }
-        if (box.desiredState === BoxDesiredState.DESTROYED) {
-          return BoxState.DESTROYING
-        }
-        break
-      case BoxState.STOPPED:
-        if (box.desiredState === BoxDesiredState.STARTED) {
-          return BoxState.STARTING
-        }
-        if (box.desiredState === BoxDesiredState.DESTROYED) {
-          return BoxState.DESTROYING
-        }
-        break
-      case BoxState.UNKNOWN:
-        if (box.desiredState === BoxDesiredState.STARTED) {
-          return BoxState.CREATING
-        }
-        break
-    }
-    return box.state
   }
 }
 
